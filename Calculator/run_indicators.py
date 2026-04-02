@@ -1,14 +1,15 @@
 import os
 import sys
+import argparse
 from pathlib import Path
 
 import geopandas as gpd
 import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from calculator.PointIndex import poi_coverage_cal
-from calculator.AoiIndex import aoi_coverage_cal, building_floor_area_cal
-from calculator.LineIndex import road_dens_cal
+from Calculator.PointIndex import poi_coverage_cal
+from Calculator.AoiIndex import aoi_coverage_cal, building_floor_area_cal
+from Calculator.LineIndex import road_dens_cal
 
 
 RAW_DATA_DIR = Path("data/raw")
@@ -34,21 +35,22 @@ def load_geojson(path: Path, label: str) -> gpd.GeoDataFrame:
     return gdf
 
 
-def load_districts() -> gpd.GeoDataFrame:
-    """Load district polygons, with fallback to the current block filename."""
-    primary_path = RAW_DATA_DIR / "hk_districts.geojson"
-    fallback_path = RAW_DATA_DIR / "hk_blocks.geojson"
-
-    if primary_path.exists():
-        return load_geojson(primary_path, "districts")
-
-    if fallback_path.exists():
-        print(f"Note: {primary_path} not found, using {fallback_path} as districts.")
-        return load_geojson(fallback_path, "districts")
-
-    raise FileNotFoundError(
-        f"Missing district file. Expected {primary_path} or fallback {fallback_path}."
+def filter_geometry_types(
+    gdf: gpd.GeoDataFrame, allowed_types: set[str], label: str
+) -> gpd.GeoDataFrame:
+    """Keep only the requested geometry types and report how many remain."""
+    filtered = gdf[gdf.geometry.geom_type.isin(allowed_types)].copy()
+    print(
+        f"Filtered {label} to geometry types {sorted(allowed_types)}: "
+        f"{len(filtered)} of {len(gdf)} features kept"
     )
+    return filtered
+
+
+def load_districts(districts_path: Path | None = None) -> gpd.GeoDataFrame:
+    """Load district polygons using the blocks file as the analysis unit."""
+    path = districts_path or (RAW_DATA_DIR / "hk_blocks.geojson")
+    return load_geojson(path, "districts")
 
 
 def load_transit_pois() -> gpd.GeoDataFrame:
@@ -57,7 +59,11 @@ def load_transit_pois() -> gpd.GeoDataFrame:
     fallback_path = RAW_DATA_DIR / "hk_pois.geojson"
 
     if primary_path.exists():
-        return load_geojson(primary_path, "transit POIs")
+        return filter_geometry_types(
+            load_geojson(primary_path, "transit POIs"),
+            {"Point", "MultiPoint"},
+            "transit POIs",
+        )
 
     pois = load_geojson(fallback_path, "combined POIs for transit fallback")
     transit_mask = (
@@ -66,7 +72,7 @@ def load_transit_pois() -> gpd.GeoDataFrame:
     )
     transit_pois = pois.loc[transit_mask].copy()
     print(f"Derived transit POIs from {fallback_path}: {len(transit_pois)} features")
-    return transit_pois
+    return filter_geometry_types(transit_pois, {"Point", "MultiPoint"}, "transit POIs")
 
 
 def load_supermarket_pois() -> gpd.GeoDataFrame:
@@ -75,42 +81,40 @@ def load_supermarket_pois() -> gpd.GeoDataFrame:
     fallback_path = RAW_DATA_DIR / "hk_pois.geojson"
 
     if primary_path.exists():
-        return load_geojson(primary_path, "supermarket POIs")
+        return filter_geometry_types(
+            load_geojson(primary_path, "supermarket POIs"),
+            {"Point", "MultiPoint"},
+            "supermarket POIs",
+        )
 
     pois = load_geojson(fallback_path, "combined POIs for supermarket fallback")
     supermarket_mask = pois.get("amenity", pd.Series(index=pois.index)).eq("supermarket")
     supermarket_pois = pois.loc[supermarket_mask].copy()
     print(f"Derived supermarket POIs from {fallback_path}: {len(supermarket_pois)} features")
-    return supermarket_pois
+    return filter_geometry_types(
+        supermarket_pois, {"Point", "MultiPoint"}, "supermarket POIs"
+    )
 
 
 def load_greenspace() -> gpd.GeoDataFrame:
-    """Load greenspace polygons, with fallback to hk_greenspace.geojson."""
-    primary_path = RAW_DATA_DIR / "hk_poi_greenspace.geojson"
-    fallback_path = RAW_DATA_DIR / "hk_greenspace.geojson"
-
-    if primary_path.exists():
-        return load_geojson(primary_path, "greenspace AOIs")
-
-    if fallback_path.exists():
-        print(f"Note: {primary_path} not found, using {fallback_path} for greenspace coverage.")
-        return load_geojson(fallback_path, "greenspace AOIs")
-
-    raise FileNotFoundError(
-        f"Missing greenspace file. Expected {primary_path} or fallback {fallback_path}."
+    """Load greenspace polygons using the greenspace file directly."""
+    greenspace = load_geojson(RAW_DATA_DIR / "hk_greenspace.geojson", "greenspace AOIs")
+    return filter_geometry_types(
+        greenspace, {"Polygon", "MultiPolygon"}, "greenspace AOIs"
     )
 
 
 def load_buildings() -> gpd.GeoDataFrame:
     """Load buildings and ensure a numeric height field is available."""
     buildings = load_geojson(RAW_DATA_DIR / "hk_buildings.geojson", "buildings").copy()
+    buildings = filter_geometry_types(buildings, {"Polygon", "MultiPolygon"}, "buildings")
 
     if "height" not in buildings.columns:
-        buildings["height"] = 15
-        print("Note: 'height' field missing in buildings. Assigned default height=15 meters.")
+        buildings["height"] = 120
+        print("Note: 'height' field missing in buildings. Assigned default height=120 meters.")
     else:
-        buildings["height"] = pd.to_numeric(buildings["height"], errors="coerce").fillna(15)
-        print("Prepared building heights using 'height' field with default fill=15 meters.")
+        buildings["height"] = pd.to_numeric(buildings["height"], errors="coerce").fillna(120)
+        print("Prepared building heights using 'height' field with default fill=120 meters.")
 
     return buildings
 
@@ -130,6 +134,13 @@ def merge_indicator(
     return merged.merge(indicator_frame, on=MERGE_KEY, how="left")
 
 
+def zero_indicator_result(districts: gpd.GeoDataFrame, indicator_column: str) -> gpd.GeoDataFrame:
+    """Create a zero-filled indicator result when an input layer is empty."""
+    result = prepare_districts_for_calc(districts)
+    result[indicator_column] = 0.0
+    return result
+
+
 def print_summary_table(result: gpd.GeoDataFrame) -> None:
     """Print min, max, and mean for each indicator column."""
     summary = (
@@ -147,9 +158,25 @@ def print_summary_table(result: gpd.GeoDataFrame) -> None:
 
 def main() -> None:
     """Run all district-level indicator calculations and save the merged output."""
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--districts",
+        default=str(RAW_DATA_DIR / "hk_blocks.geojson"),
+        help="Input district/block GeoJSON path.",
+    )
+    parser.add_argument(
+        "--output",
+        default=str(OUTPUT_PATH),
+        help="Output GeoJSON path for indicator results.",
+    )
+    args = parser.parse_args()
+
     PROCESSED_DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-    districts = load_districts()
+    districts_path = Path(args.districts)
+    output_path = Path(args.output)
+
+    districts = load_districts(districts_path)
     roads = load_geojson(RAW_DATA_DIR / "hk_roads.geojson", "roads")
     buildings = load_buildings()
     transit_pois = load_transit_pois()
@@ -170,12 +197,16 @@ def main() -> None:
     )
     merged_result = merge_indicator(merged_result, transit_result, "transit_coverage_rate")
 
-    supermarket_result = poi_coverage_cal(
-        supermarket_pois.copy(),
-        prepare_districts_for_calc(districts),
-        poi_type="supermarket",
-        buffer_distance=300,
-    )
+    if supermarket_pois.empty:
+        print("Note: supermarket POI layer is empty. Filling supermarket_coverage_rate with 0.")
+        supermarket_result = zero_indicator_result(districts, "supermarket_coverage_rate")
+    else:
+        supermarket_result = poi_coverage_cal(
+            supermarket_pois.copy(),
+            prepare_districts_for_calc(districts),
+            poi_type="supermarket",
+            buffer_distance=300,
+        )
     merged_result = merge_indicator(
         merged_result, supermarket_result, "supermarket_coverage_rate"
     )
@@ -202,9 +233,10 @@ def main() -> None:
     merged_result[INDICATOR_COLUMNS] = merged_result[INDICATOR_COLUMNS].fillna(0)
     merged_result = gpd.GeoDataFrame(merged_result, geometry="geometry", crs=districts.crs)
     merged_result = merged_result.drop(columns=[MERGE_KEY])
-    merged_result.to_file(OUTPUT_PATH, driver="GeoJSON")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    merged_result.to_file(output_path, driver="GeoJSON")
 
-    print(f"\nSaved merged indicator file to {OUTPUT_PATH}")
+    print(f"\nSaved merged indicator file to {output_path}")
     print_summary_table(merged_result)
 
 

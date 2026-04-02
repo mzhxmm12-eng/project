@@ -24,8 +24,8 @@ def road_dens_cal(raw_road: gpd.GeoDataFrame, block: gpd.GeoDataFrame) -> gpd.Ge
 
     overlap = gpd.overlay(raw_road, block)[['join_id', 'geometry']]
     overlap['road_len'] = overlap.length
-    len = overlap.groupby(['join_id']).sum()[['road_len']]
-    res = pd.merge(block, len, how='outer',
+    road_length = overlap.drop(columns=['geometry']).groupby(['join_id']).sum()[['road_len']]
+    res = pd.merge(block, road_length, how='outer',
                    left_on='join_id', right_index=True)
     res['road_len_sum'] = res['road_len'].fillna(
         0).astype('float').round(2)
