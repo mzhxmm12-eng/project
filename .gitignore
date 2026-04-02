@@ -1,0 +1,11 @@
+**/数据/
+**/common_utils/
+**.ipynb
+*.pyc/
+.idea/
+**/__pycache__/
+**/debug/
+main2.py
+**.geojson
+cache/
+data/processed/
