@@ -5,7 +5,6 @@ from pathlib import Path
 
 import folium
 import geopandas as gpd
-import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
 from openai import DefaultHttpxClient, OpenAI
@@ -18,9 +17,128 @@ except ModuleNotFoundError:
     from Calculator.CompositeIndex import build_composite_index
 
 
-DATA_PATH = Path("data/processed/urban_districts_scored.geojson")
+DATA_PATH = Path("data/processed/urban_districts_with_indicators.geojson")
 MAP_CENTER = [22.32, 114.17]
 MAP_ZOOM = 11
+TPU_NAMES = {
+    "100": "Kennedy Town",
+    "110": "Sai Ying Pun",
+    "111": "Sai Ying Pun & Sheung Wan",
+    "112": "Central",
+    "113": "Admiralty",
+    "114": "Wan Chai",
+    "115": "Causeway Bay",
+    "116": "North Point",
+    "117": "Quarry Bay",
+    "118": "Sai Wan Ho",
+    "119": "Shau Kei Wan",
+    "120": "Chai Wan",
+    "121": "Stanley",
+    "122": "Aberdeen",
+    "123": "Ap Lei Chau",
+    "124": "Wong Chuk Hang",
+    "125": "Pok Fu Lam",
+    "126": "The Peak",
+    "130": "Kennedy Town & Mount Davis",
+    "131": "Sai Ying Pun North",
+    "132": "Pok Fu Lam South",
+    "140": "Tin Hau",
+    "150": "Tai Hang",
+    "158": "Jardine's Lookout",
+    "160": "Happy Valley",
+    "170": "Mid-Levels",
+    "180": "Repulse Bay",
+    "190": "Deep Water Bay",
+    "194": "Tai Tam",
+    "210": "Tsim Sha Tsui",
+    "211": "Tsim Sha Tsui East",
+    "212": "Yau Ma Tei",
+    "213": "Mong Kok",
+    "214": "Sham Shui Po",
+    "215": "Cheung Sha Wan",
+    "216": "Lai Chi Kok",
+    "220": "Ho Man Tin",
+    "221": "Kowloon Tong",
+    "222": "Kowloon City",
+    "223": "Hung Hom",
+    "224": "To Kwa Wan",
+    "225": "Ma Tau Wai",
+    "230": "Wong Tai Sin",
+    "231": "Diamond Hill",
+    "232": "Tsz Wan Shan",
+    "233": "San Po Kong",
+    "240": "Kwun Tong",
+    "241": "Ngau Tau Kok",
+    "242": "Lam Tin",
+    "243": "Yau Tong",
+    "244": "Tseung Kwan O North",
+    "250": "Kowloon Bay",
+    "255": "Kai Tak",
+    "260": "Jordan",
+    "270": "Prince Edward",
+    "280": "Shek Kip Mei",
+    "289": "Beacon Hill",
+    "310": "Kwai Chung",
+    "311": "Kwai Fong",
+    "312": "Tsing Yi",
+    "313": "Kwai Hing",
+    "320": "Tsuen Wan",
+    "321": "Tsuen Wan West",
+    "325": "Sham Tseng",
+    "330": "Tuen Mun",
+    "331": "Tuen Mun South",
+    "340": "Yuen Long",
+    "341": "Yuen Long South",
+    "342": "Tin Shui Wai",
+    "350": "Sheung Shui",
+    "351": "Fanling",
+    "360": "Tai Po",
+    "361": "Tai Po Hui",
+    "370": "Sha Tin",
+    "371": "Sha Tin Town Centre",
+    "372": "Ma On Shan",
+    "380": "Sai Kung",
+    "381": "Tseung Kwan O South",
+    "390": "Tung Chung",
+    "391": "Lantau North",
+    "700": "Kowloon (Extended)",
+    "710": "Hung Hom Bay",
+    "720": "Whampoa",
+    "730": "Ho Man Tin South",
+    "733": "Jordan Valley",
+    "740": "Kwun Tong Waterfront",
+    "750": "Kowloon East",
+    "754": "Kowloon Bay Business Area",
+    "755": "Kai Tak Development",
+    "760": "New Kowloon",
+    "761": "Diamond Hill North",
+    "800": "New Territories (Extended)",
+    "820": "Tuen Mun East",
+    "824": "Tuen Mun North",
+    "829": "Yuen Long East",
+    "830": "Fanling North",
+    "840": "Kwu Tung",
+}
+SCENARIOS = {
+    "Balanced": {
+        "w_skeleton": 0.4,
+        "w_metabolism": 0.3,
+        "w_circulatory": 0.3,
+        "desc": "Equal emphasis · default setting",
+    },
+    "Building-led": {
+        "w_skeleton": 0.6,
+        "w_metabolism": 0.2,
+        "w_circulatory": 0.2,
+        "desc": "Focus on building density & FAR",
+    },
+    "Service-led": {
+        "w_skeleton": 0.2,
+        "w_metabolism": 0.5,
+        "w_circulatory": 0.3,
+        "desc": "Focus on services & green space",
+    },
+}
 DEEPSEEK_SYSTEM_PROMPT = """You are an expert Urban Informatics assistant for the Hong Kong Urban Renewal Index Calculator.
 You specialize in:
 
@@ -50,8 +168,8 @@ For Chinese queries, respond in fluent Mandarin Chinese.
 
 
 @st.cache_data
-def load_scored_geojson(path: str) -> gpd.GeoDataFrame:
-    gdf = gpd.read_file(path)
+def load_data() -> gpd.GeoDataFrame:
+    gdf = gpd.read_file(DATA_PATH)
     if gdf.crs is None:
         gdf = gdf.set_crs(epsg=4326)
     else:
@@ -71,72 +189,83 @@ def get_district_id_column(gdf: gpd.GeoDataFrame) -> str:
         "Name",
         "ENAME",
         "index",
+        "TPU_NUMBER",
     ]
     matching = [column for column in gdf.columns if column in candidates]
     return matching[0] if matching else gdf.columns[0]
 
 
-def prepare_tooltip_columns(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
-    tooltip_gdf = gdf.copy()
-    for column in [
-        "renewal_priority",
-        "skeleton_score",
-        "metabolism_score",
-        "circulatory_score",
-    ]:
-        tooltip_gdf[f"{column}_display"] = tooltip_gdf[column].map(lambda value: f"{value:.2f}")
-    return tooltip_gdf
+def get_tpu_display_name(tpu_number) -> str:
+    tpu_str = str(tpu_number).strip()
+    if tpu_str in TPU_NAMES:
+        return f"{tpu_str} · {TPU_NAMES[tpu_str]}"
+    region_map = {
+        "1": "HK Island",
+        "2": "Kowloon",
+        "3": "New Territories",
+        "7": "Kowloon Ext.",
+        "8": "NT Ext.",
+        "9": "Outlying Islands",
+    }
+    region = region_map.get(tpu_str[0], "HK") if tpu_str else "Unknown"
+    return f"{tpu_str} · {region}"
 
 
-def build_priority_map(gdf: gpd.GeoDataFrame, id_col: str) -> folium.Map:
-    map_gdf = prepare_tooltip_columns(gdf)
-    folium_map = folium.Map(location=MAP_CENTER, zoom_start=MAP_ZOOM, tiles="CartoDB positron")
+def build_priority_map(scored: gpd.GeoDataFrame, district_id_column: str) -> folium.Map:
+    scored_json = scored.to_json()
+    m = folium.Map(location=MAP_CENTER, zoom_start=MAP_ZOOM, tiles="CartoDB positron")
 
     folium.Choropleth(
-        geo_data=map_gdf.to_json(),
-        data=map_gdf[[id_col, "renewal_priority"]],
-        columns=[id_col, "renewal_priority"],
-        key_on=f"feature.properties.{id_col}",
+        geo_data=scored_json,
+        data=scored[[district_id_column, "renewal_priority"]],
+        columns=[district_id_column, "renewal_priority"],
+        key_on=f"feature.properties.{district_id_column}",
         fill_color="RdYlGn_r",
         fill_opacity=0.7,
         line_opacity=0.6,
         line_color="black",
         legend_name="Renewal Priority Score",
         highlight=True,
-    ).add_to(folium_map)
+    ).add_to(m)
 
     folium.GeoJson(
-        map_gdf.to_json(),
-        style_function=lambda _: {
-            "fillColor": "transparent",
-            "color": "black",
-            "weight": 0.7,
-            "fillOpacity": 0.0,
+        scored_json,
+        name="TPU",
+        style_function=lambda f: {
+            "fillOpacity": 0,
+            "weight": 0,
         },
         tooltip=folium.GeoJsonTooltip(
             fields=[
-                id_col,
-                "renewal_priority_display",
+                "display_name",
+                "renewal_priority",
                 "priority_level",
-                "skeleton_score_display",
-                "metabolism_score_display",
-                "circulatory_score_display",
+                "skeleton_score",
+                "metabolism_score",
+                "circulatory_score",
             ],
             aliases=[
-                f"{id_col}:",
-                "Renewal priority:",
-                "Priority level:",
-                "Skeleton score:",
-                "Metabolism score:",
-                "Circulatory score:",
+                "TPU:",
+                "Priority Score:",
+                "Level:",
+                "Skeleton:",
+                "Metabolism:",
+                "Circulatory:",
             ],
             localize=True,
-            sticky=False,
+            sticky=True,
             labels=True,
+            style="""
+                background-color: white;
+                border: 1px solid #ccc;
+                border-radius: 6px;
+                padding: 8px;
+                font-size: 13px;
+            """,
         ),
-    ).add_to(folium_map)
+    ).add_to(m)
 
-    return folium_map
+    return m
 
 
 def get_deepseek_response(messages: list) -> str:
@@ -438,17 +567,35 @@ def main() -> None:
     st.set_page_config(layout="wide", page_title="HK Urban Renewal Index")
 
     st.sidebar.title("Urban Organism Weights")
-    st.sidebar.subheader("Adjust dimension weights (must sum to 1.0)")
 
-    w_skeleton = st.sidebar.slider("Skeleton (Building)", 0.0, 1.0, 0.4, 0.05)
-    w_metabolism = st.sidebar.slider("Metabolism (Services)", 0.0, 1.0, 0.3, 0.05)
-    w_circulatory = st.sidebar.slider("Circulatory (Roads)", 0.0, 1.0, 0.3, 0.05)
+    if "scenario" not in st.session_state:
+        st.session_state.scenario = "Balanced"
 
-    total = w_skeleton + w_metabolism + w_circulatory
-    if abs(total - 1.0) > 0.01:
-        st.sidebar.warning(f"Weights sum to {total:.2f}, should be 1.0")
-    else:
-        st.sidebar.success("Weights valid")
+    st.sidebar.subheader("Assessment Scenario")
+    for name, cfg in SCENARIOS.items():
+        is_active = st.session_state.scenario == name
+        if st.sidebar.button(
+            name,
+            key=f"btn_{name}",
+            use_container_width=True,
+            type="primary" if is_active else "secondary",
+        ):
+            st.session_state.scenario = name
+            st.rerun()
+        st.sidebar.caption(cfg["desc"])
+        st.sidebar.write("")
+
+    cfg = SCENARIOS[st.session_state.scenario]
+    w_skeleton = cfg["w_skeleton"]
+    w_metabolism = cfg["w_metabolism"]
+    w_circulatory = cfg["w_circulatory"]
+
+    st.sidebar.divider()
+    st.sidebar.markdown(
+        f"**Weights:** Skeleton `{w_skeleton}` · "
+        f"Metabolism `{w_metabolism}` · "
+        f"Circulatory `{w_circulatory}`"
+    )
 
     st.sidebar.divider()
     st.sidebar.caption("Urban Organism Theory")
@@ -464,9 +611,15 @@ def main() -> None:
     )
     st.divider()
 
-    gdf = load_scored_geojson(str(DATA_PATH))
-    scored_gdf = build_composite_index(gdf, w_skeleton, w_metabolism, w_circulatory)
-    id_col = get_district_id_column(scored_gdf)
+    gdf = load_data()
+    scored = build_composite_index(
+        gdf.copy(),
+        w_skeleton=w_skeleton,
+        w_metabolism=w_metabolism,
+        w_circulatory=w_circulatory,
+    )
+    scored["display_name"] = scored["TPU_NUMBER"].apply(get_tpu_display_name)
+    id_col = get_district_id_column(scored)
 
     if "pending_chat_msg" in st.session_state and st.session_state.pending_chat_msg:
         user_msg = st.session_state.pending_chat_msg
@@ -485,24 +638,26 @@ def main() -> None:
     left_col, right_col = st.columns([6, 4])
 
     with left_col:
-        st.subheader("Interactive Priority Map")
-        folium_map = build_priority_map(scored_gdf, id_col)
-        st_folium(folium_map, width=700, height=500)
+        st.subheader(f"Interactive Priority Map - {st.session_state.scenario} Scenario")
+        m = build_priority_map(scored, id_col)
+        st_folium(m, width=700, height=500)
 
     with right_col:
         st.subheader("Urban Renewal Summary")
-        high_count = int((scored_gdf["priority_level"] == "High").sum())
-        mean_priority = float(scored_gdf["renewal_priority"].mean())
-        top_district = scored_gdf.sort_values("renewal_priority", ascending=False).iloc[0]
+
+        high_count = int((scored["priority_level"] == "High").sum())
+        mean_priority = float(scored["renewal_priority"].mean())
+        top_idx = scored["renewal_priority"].idxmax()
+        top_name = scored.loc[top_idx, "display_name"]
 
         metric_cols = st.columns(3)
         metric_cols[0].metric("High priority districts", high_count)
         metric_cols[1].metric("Mean priority score", f"{mean_priority:.3f}")
-        metric_cols[2].metric("Top district ID", str(top_district[id_col]))
+        metric_cols[2].metric("Top Priority TPU", top_name)
 
         st.markdown("**Average Dimension Scores**")
         avg_scores = (
-            scored_gdf[["skeleton_score", "metabolism_score", "circulatory_score"]]
+            scored[["skeleton_score", "metabolism_score", "circulatory_score"]]
             .mean()
             .rename(
                 {
@@ -516,10 +671,9 @@ def main() -> None:
         st.bar_chart(avg_scores, horizontal=True)
 
         st.markdown("**Top 10 Districts**")
-        top_ten = scored_gdf.sort_values("renewal_priority", ascending=False).head(10).copy()
-        top10_df = top_ten[
+        top10_df = scored.nlargest(10, "renewal_priority")[
             [
-                id_col,
+                "display_name",
                 "renewal_priority",
                 "priority_level",
                 "skeleton_score",
@@ -527,17 +681,30 @@ def main() -> None:
                 "circulatory_score",
             ]
         ].copy()
+
         st.dataframe(
-            top10_df.style.format(
+            top10_df.rename(
+                columns={
+                    "display_name": "TPU",
+                    "renewal_priority": "Priority Score",
+                    "priority_level": "Level",
+                    "skeleton_score": "Skeleton",
+                    "metabolism_score": "Metabolism",
+                    "circulatory_score": "Circulatory",
+                }
+            )
+            .reset_index(drop=True)
+            .style.format(
                 {
-                    "renewal_priority": "{:.3f}",
-                    "skeleton_score": "{:.3f}",
-                    "metabolism_score": "{:.3f}",
-                    "circulatory_score": "{:.3f}",
+                    "Priority Score": "{:.3f}",
+                    "Skeleton": "{:.3f}",
+                    "Metabolism": "{:.3f}",
+                    "Circulatory": "{:.3f}",
                 }
             ),
             use_container_width=True,
         )
+
         csv = top10_df.to_csv(index=False)
         st.download_button(
             label="Download top 10 as CSV",
